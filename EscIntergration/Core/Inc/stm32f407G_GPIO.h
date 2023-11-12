@@ -87,8 +87,8 @@ void GPIO_DeInit(GPIO_RegDef *pGPIOx);
 
 void GPIO_PeriClockControl(GPIO_RegDef *pGIOx, uint8_t state);
 
-void GPIO_ReadInputPin(GPIO_RegDef *pGPIOx, uint8_t PinNumber);
-void GPIO_ReadInputPort(GPIO_RegDef *pGPIOx);
+uint8_t GPIO_ReadInputPin(GPIO_RegDef *pGPIOx, uint8_t PinNumber);
+uint16_t GPIO_ReadInputPort(GPIO_RegDef *pGPIOx);
 void GPIO_WriteOutputPin(GPIO_RegDef *pGPIOx, uint8_t PinNumber, uint8_t value);
 void GPIO_WriteOutputPort(GPIO_RegDef *pGPIOx, uint8_t value);
 void GPIO_ToggleOutputPin(GPIO_RegDef *pGPIOx, uint8_t PinNumber);
