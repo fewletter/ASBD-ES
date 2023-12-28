@@ -28,6 +28,7 @@
 #include "ISConstants.h"
 #include <stdio.h>
 #include "PS2.h"
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -78,7 +79,7 @@ osThreadId_t myTask02Handle;
 const osThreadAttr_t myTask02_attributes = {
   .name = "myTask02",
   .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityHigh,
+  .priority = (osPriority_t) osPriorityNormal,
 };
 /* USER CODE BEGIN PV */
 osThreadId_t PS2CommandTaskHandle;
@@ -114,13 +115,44 @@ void StartPS2CommandTask(void *argument);
 /* USER CODE BEGIN 0 */
 static PS2_State *PS2;
 uint8_t s_buffer[2048] = {0};
-unsigned char rx_buffer[2048] = {0};
+uint8_t receive_buffer[200] = {0};
+
+struct Scooter{
+    float theta[3];
+};
+
+struct Scooter E_scooter = { {0.0, 0.0, 0.0} };
 
 static is_comm_instance_t comm;
 
-static void handleINSMessage(ins_1_t *ins)
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-  printf("%u \n", ins->week);
+    //HAL_UART_Receive_IT(&huart2, receive_buffer, 200);
+	float theta = 0;
+	int comma_count = 0;
+	for (int i = 0; receive_buffer[i] != '\r' && receive_buffer[i+1] != '\n'; i++) {
+		if (receive_buffer[i] == ',')
+			comma_count += 1;
+
+		if (comma_count == 5 && receive_buffer[i-1] == ',')
+			E_scooter.theta[0] = (receive_buffer[i] - '0') * 1
+								+ (receive_buffer[i+2] - '0') * 0.1
+								+ (receive_buffer[i+3] - '0') * 0.01
+								+ (receive_buffer[i+4] - '0') * 0.001
+								+ (receive_buffer[i+5] - '0') * 0.0001;
+		else if (comma_count == 6 && receive_buffer[i-1] == ',')
+			E_scooter.theta[1] = (receive_buffer[i] - '0') * 1
+								+ (receive_buffer[i+2] - '0') * 0.1
+								+ (receive_buffer[i+3] - '0') * 0.01
+								+ (receive_buffer[i+4] - '0') * 0.001
+								+ (receive_buffer[i+5] - '0') * 0.0001;
+		else if (comma_count == 7 && receive_buffer[i-1] == ',')
+			E_scooter.theta[2] = (receive_buffer[i] - '0') * 1
+								+ (receive_buffer[i+2] - '0') * 0.1
+								+ (receive_buffer[i+3] - '0') * 0.01
+								+ (receive_buffer[i+4] - '0') * 0.001
+								+ (receive_buffer[i+5] - '0') * 0.0001;
+	}
 }
 
 bool checkAsciiHex(uint8_t digit)
@@ -183,6 +215,8 @@ int main(void)
   HAL_DAC_Start(&hdac, DAC_CHANNEL_1);
   HAL_ADC_Start(&hadc1);
   HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 0);
+
+  //HAL_UART_Receive_IT(&huart2, receive_buffer, 200);
 
   is_comm_init(&comm, s_buffer, sizeof(s_buffer));
   //int messageSize = is_comm_stop_broadcasts_all_ports(&comm);
@@ -883,7 +917,7 @@ static void MX_GPIO_Init(void)
         		 lptr++;
 	     }
          uint16_t vptr = 4096 - L_ud_analog*4096/256;
-         printf("%d %d %d %d\n", L_ud_analog, L_lr_analog, R_ud_analog, R_lr_analog);
+         //printf("%d %d %d %d\n", L_ud_analog, L_lr_analog, R_ud_analog, R_lr_analog);
 
          //HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 0);
          if (dac_value < 4095) {
@@ -926,10 +960,11 @@ void StartDefaultTask(void *argument)
 void StartTask02(void *argument)
 {
   /* USER CODE BEGIN StartTask02 */
-
+  //HAL_UART_Receive_IT(&huart2, receive_buffer, 200);
   /* Infinite loop */
   while (1) {
-	  HAL_UART_Receive(&huart2, rx_buffer, 125, 10);
+	  HAL_UART_Receive_IT(&huart2, receive_buffer, 200);
+	  //HAL_UART_Receive(&huart2, receive_buffer, 200, 50);
       osDelay(1);
   }
   /* USER CODE END StartTask02 */
