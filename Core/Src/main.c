@@ -25,10 +25,12 @@
 #include <stdbool.h>
 #include "data_sets.h"
 #include "ISComm.h"
+#include "IS_UART_Comm.h"
 #include "ISConstants.h"
 #include <stdio.h>
 #include "PS2.h"
 #include <string.h>
+#include "RWheel.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -38,7 +40,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define UART_RXSIZE 145
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -53,11 +55,11 @@ DAC_HandleTypeDef hdac;
 
 I2C_HandleTypeDef hi2c1;
 
-SPI_HandleTypeDef hspi1;
 SPI_HandleTypeDef hspi2;
 
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim6;
+TIM_HandleTypeDef htim7;
 DMA_HandleTypeDef hdma_tim1_ch1;
 
 UART_HandleTypeDef huart2;
@@ -65,29 +67,24 @@ UART_HandleTypeDef huart3;
 DMA_HandleTypeDef hdma_usart3_rx;
 DMA_HandleTypeDef hdma_usart3_tx;
 
-HCD_HandleTypeDef hhcd_USB_OTG_FS;
+PCD_HandleTypeDef hpcd_USB_OTG_FS;
 
-/* Definitions for defaultTask */
-osThreadId_t defaultTaskHandle;
-const osThreadAttr_t defaultTask_attributes = {
-  .name = "defaultTask",
-  .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
+/* Definitions for BalanceTask */
+osThreadId_t BalanceTaskHandle;
+const osThreadAttr_t BalanceTask_attributes = {
+  .name = "BalanceTask",
+  .stack_size = 2048 * 4,
+  .priority = (osPriority_t) osPriorityHigh,
 };
-/* Definitions for myTask02 */
-osThreadId_t myTask02Handle;
-const osThreadAttr_t myTask02_attributes = {
-  .name = "myTask02",
+/* Definitions for SpeedRotation */
+osThreadId_t SpeedRotationHandle;
+const osThreadAttr_t SpeedRotation_attributes = {
+  .name = "SpeedRotation",
   .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
+  .priority = (osPriority_t) osPriorityAboveNormal,
 };
 /* USER CODE BEGIN PV */
-osThreadId_t PS2CommandTaskHandle;
-const osThreadAttr_t PS2CommandTask_attributes = {
-  .name = "PS2CommandTask",
-  .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
-};
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -99,70 +96,134 @@ static void MX_USART2_UART_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_SPI2_Init(void);
 static void MX_DAC_Init(void);
-static void MX_SPI1_Init(void);
 static void MX_ADC1_Init(void);
-static void MX_USB_OTG_FS_HCD_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_TIM6_Init(void);
-void StartDefaultTask(void *argument);
-void StartTask02(void *argument);
+static void MX_TIM7_Init(void);
+static void MX_USB_OTG_FS_PCD_Init(void);
+void StartBalanceTask(void *argument);
+void StartSpeedRotation(void *argument);
 
 /* USER CODE BEGIN PFP */
-void StartPS2CommandTask(void *argument);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-static PS2_State *PS2;
-uint8_t s_buffer[2048] = {0};
-uint8_t receive_buffer[200] = {0};
 
-struct Scooter{
-    float theta[3];
+uint8_t uartRX_buffer[UART_RXSIZE] = {0};
+
+uint8_t i2cRxBuffer[10] = {0};
+uint8_t i2cTxBuffer[2] = {1, 6};
+uint16_t DAC_value = 1;
+
+CommPacket IMUData = {
+	.buffer = {0},
+	.head = NULL,
+	.tail = NULL,
+	.breakpoint = NULL,
+	.datatype = 0
 };
 
-struct Scooter E_scooter = { {0.0, 0.0, 0.0} };
+E_Scooter E_scooter_state = {
+    .theta = 0,
+    .delta = 0,
+    .linearv = 0
+};
 
-static is_comm_instance_t comm;
+PS2_State PS2 = {0, {0, 0}, {0, 0}};
+
+bool checkAsciidigit(uint8_t digit)
+{
+	return ((digit - '0') >= 0 && (digit - '9') <= 0) ? true : false;
+}
+
+/*
+ * Interrupt callback function
+ */
+void HAL_I2C_MasterRxCpltCallback (I2C_HandleTypeDef * hi2c)
+{
+	PS2.Button = PS2_L1;
+	PS2.Lstick[0] = i2cRxBuffer[0];
+	PS2.Lstick[1] = i2cRxBuffer[1];
+	PS2.Rstick[0] = i2cRxBuffer[2];
+	PS2.Rstick[1] = i2cRxBuffer[3];
+}
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-    //HAL_UART_Receive_IT(&huart2, receive_buffer, 200);
-	float theta = 0;
 	int comma_count = 0;
-	for (int i = 0; receive_buffer[i] != '\r' && receive_buffer[i+1] != '\n'; i++) {
-		if (receive_buffer[i] == ',')
-			comma_count += 1;
-
-		if (comma_count == 5 && receive_buffer[i-1] == ',')
-			E_scooter.theta[0] = (receive_buffer[i] - '0') * 1
-								+ (receive_buffer[i+2] - '0') * 0.1
-								+ (receive_buffer[i+3] - '0') * 0.01
-								+ (receive_buffer[i+4] - '0') * 0.001
-								+ (receive_buffer[i+5] - '0') * 0.0001;
-		else if (comma_count == 6 && receive_buffer[i-1] == ',')
-			E_scooter.theta[1] = (receive_buffer[i] - '0') * 1
-								+ (receive_buffer[i+2] - '0') * 0.1
-								+ (receive_buffer[i+3] - '0') * 0.01
-								+ (receive_buffer[i+4] - '0') * 0.001
-								+ (receive_buffer[i+5] - '0') * 0.0001;
-		else if (comma_count == 7 && receive_buffer[i-1] == ',')
-			E_scooter.theta[2] = (receive_buffer[i] - '0') * 1
-								+ (receive_buffer[i+2] - '0') * 0.1
-								+ (receive_buffer[i+3] - '0') * 0.01
-								+ (receive_buffer[i+4] - '0') * 0.001
-								+ (receive_buffer[i+5] - '0') * 0.0001;
+	uint8_t modify_buffer[80] = {0};
+	/*
+	for (int i = 0; i < 80; i++) {
+		if (uartRX_buffer[i] == '$' && uartRX_buffer[i+1] == 'P' && uartRX_buffer[i+2] == 'P' && uartRX_buffer[i+3] == 'I' && uartRX_buffer[i+4] == 'M' && uartRX_buffer[i+5] == 'U') {
+			strncpy( modify_buffer, &uartRX_buffer[i], 80-i);
+			strncpy( &modify_buffer[80-i], uartRX_buffer, i);
+			break;
+		}
 	}
-}
 
-bool checkAsciiHex(uint8_t digit)
-{
-	if ((digit - '0') >= 0 && (digit - '9') <= 0)
-		return true;
-	else if ((digit - 'A') >= 0 && (digit - 'F') <= 0)
-		return true;
-	else
-		return false;
+    bool sign = 0;
+    int start = 0;
+	for (int i = 0; i < 80; i++) {
+		if (modify_buffer[i] == ',') {
+			comma_count += 1;
+			sign = modify_buffer[i+1] == '-' ? 1 : 0;
+		    start = i+1+sign;
+
+		    switch (comma_count) {
+			case 2:
+				E_scooter.theta[0] = (checkAsciidigit(modify_buffer[start]) ?  modify_buffer[start] - '0': 0)
+						+ (checkAsciidigit(modify_buffer[start+2]) ?  (modify_buffer[start+2] - '0') * 0.1: 0)
+						+ (checkAsciidigit(modify_buffer[start+3]) ?  (modify_buffer[start+3] - '0') * 0.01: 0)
+						+ (checkAsciidigit(modify_buffer[start+4]) ?  (modify_buffer[start+4] - '0') * 0.001: 0)
+						+ (checkAsciidigit(modify_buffer[start+5]) ?  (modify_buffer[start+5] - '0') * 0.0001: 0);
+				E_scooter.theta[0] = sign ? E_scooter.theta[0]*(-1) : E_scooter.theta[0];
+				break;
+			case 3:
+				E_scooter.theta[1] = (checkAsciidigit(modify_buffer[start]) ?  modify_buffer[start] - '0': 0)
+						+ (checkAsciidigit(modify_buffer[start+2]) ?  (modify_buffer[start+2] - '0') * 0.1: 0)
+						+ (checkAsciidigit(modify_buffer[start+3]) ?  (modify_buffer[start+3] - '0') * 0.01: 0)
+						+ (checkAsciidigit(modify_buffer[start+4]) ?  (modify_buffer[start+4] - '0') * 0.001: 0)
+						+ (checkAsciidigit(modify_buffer[start+5]) ?  (modify_buffer[start+5] - '0') * 0.0001: 0);
+				E_scooter.theta[1] = sign ? E_scooter.theta[1]*(-1) : E_scooter.theta[1];
+				break;
+			case 4:
+				E_scooter.theta[2] = (checkAsciidigit(modify_buffer[start]) ?  modify_buffer[start] - '0': 0)
+						+ (checkAsciidigit(modify_buffer[start+2]) ?  (modify_buffer[start+2] - '0') * 0.1: 0)
+						+ (checkAsciidigit(modify_buffer[start+3]) ?  (modify_buffer[start+3] - '0') * 0.01: 0)
+						+ (checkAsciidigit(modify_buffer[start+4]) ?  (modify_buffer[start+4] - '0') * 0.001: 0)
+						+ (checkAsciidigit(modify_buffer[start+5]) ?  (modify_buffer[start+5] - '0') * 0.0001: 0);
+				E_scooter.theta[2] = sign ? E_scooter.theta[2]*(-1) : E_scooter.theta[2];
+				break;
+			case 5:
+				E_scooter.vel[0] = (checkAsciidigit(modify_buffer[start]) ?  modify_buffer[start] - '0': 0)
+						+ (checkAsciidigit(modify_buffer[start+2]) ?  (modify_buffer[start+2] - '0') * 0.1: 0)
+						+ (checkAsciidigit(modify_buffer[start+3]) ?  (modify_buffer[start+3] - '0') * 0.01: 0)
+						+ (checkAsciidigit(modify_buffer[start+4]) ?  (modify_buffer[start+4] - '0') * 0.001: 0)
+						+ (checkAsciidigit(modify_buffer[start+5]) ?  (modify_buffer[start+5] - '0') * 0.0001: 0);
+				E_scooter.vel[0] = sign ? E_scooter.vel[0]*(-1) : E_scooter.vel[0];
+				break;
+			case 6:
+				E_scooter.vel[1] = (checkAsciidigit(modify_buffer[start]) ?  modify_buffer[start] - '0': 0)
+						+ (checkAsciidigit(modify_buffer[start+2]) ?  (modify_buffer[start+2] - '0') * 0.1: 0)
+						+ (checkAsciidigit(modify_buffer[start+3]) ?  (modify_buffer[start+3] - '0') * 0.01: 0)
+						+ (checkAsciidigit(modify_buffer[start+4]) ?  (modify_buffer[start+4] - '0') * 0.001: 0)
+						+ (checkAsciidigit(modify_buffer[start+5]) ?  (modify_buffer[start+5] - '0') * 0.0001: 0);
+				E_scooter.vel[1] = sign ? E_scooter.vel[1]*(-1) : E_scooter.vel[1];
+				break;
+			case 7:
+				E_scooter.vel[2] = (checkAsciidigit(modify_buffer[start]) ?  modify_buffer[start] - '0': 0)
+						+ (checkAsciidigit(modify_buffer[start+2]) ?  (modify_buffer[start+2] - '0') * 0.1: 0)
+						+ (checkAsciidigit(modify_buffer[start+3]) ?  (modify_buffer[start+3] - '0') * 0.01: 0)
+						+ (checkAsciidigit(modify_buffer[start+4]) ?  (modify_buffer[start+4] - '0') * 0.001: 0)
+						+ (checkAsciidigit(modify_buffer[start+5]) ?  (modify_buffer[start+5] - '0') * 0.0001: 0);
+				E_scooter.vel[2] = sign ? E_scooter.vel[2]*(-1) : E_scooter.vel[2];
+				break;
+			}
+		}
+	}
+	*/
+	//HAL_UART_Receive_IT(&huart2, uartRX_buffer, 150);
 }
 
 uint8_t mapAsciiuint8(uint8_t digit)
@@ -205,20 +266,16 @@ int main(void)
   MX_TIM1_Init();
   MX_SPI2_Init();
   MX_DAC_Init();
-  MX_SPI1_Init();
   MX_ADC1_Init();
-  MX_USB_OTG_FS_HCD_Init();
   MX_USART3_UART_Init();
   MX_TIM6_Init();
+  MX_TIM7_Init();
+  MX_USB_OTG_FS_PCD_Init();
   /* USER CODE BEGIN 2 */
   HAL_TIM_Base_Start(&htim6);
   HAL_DAC_Start(&hdac, DAC_CHANNEL_1);
   HAL_ADC_Start(&hadc1);
-  HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 0);
 
-  //HAL_UART_Receive_IT(&huart2, receive_buffer, 200);
-
-  is_comm_init(&comm, s_buffer, sizeof(s_buffer));
   //int messageSize = is_comm_stop_broadcasts_all_ports(&comm);
   //float rotation[3] = { 90.0f*C_DEG2RAD_F, 0.0f, 0.0f };
   //messageSize = is_comm_set_data(&comm, DID_INS_1, offsetof(ins_1_t, theta), sizeof(float) * 3, rotation);
@@ -245,15 +302,14 @@ int main(void)
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
-  /* creation of defaultTask */
-  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+  /* creation of BalanceTask */
+  BalanceTaskHandle = osThreadNew(StartBalanceTask, NULL, &BalanceTask_attributes);
 
-  /* creation of myTask02 */
-  myTask02Handle = osThreadNew(StartTask02, NULL, &myTask02_attributes);
+  /* creation of SpeedRotation */
+  SpeedRotationHandle = osThreadNew(StartSpeedRotation, NULL, &SpeedRotation_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
-  PS2CommandTaskHandle = osThreadNew(StartPS2CommandTask, NULL, &PS2CommandTask_attributes);
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -266,11 +322,20 @@ int main(void)
   /* We should never get here as control is now taken by the scheduler */
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+
   while (1)
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+	  //HAL_UART_Receive_IT(&huart2, (uint8_t *) uartRX_buffer, 80);
+	  PS2_ReadData(&hi2c1, i2cRxBuffer);
+	  if (i2cRxBuffer[1] > 128)
+		  DAC_value = DAC_value == 0 ? 0 : DAC_value - 10;
+	  else if (i2cRxBuffer[1] < 128)
+	  	  DAC_value = (4095 - 4095*(255 - i2cRxBuffer[1])/128) | 0xfff;
+	  HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, DAC_value);
+      HAL_Delay(100);
   }
   /* USER CODE END 3 */
 }
@@ -400,9 +465,16 @@ static void MX_DAC_Init(void)
 
   /** DAC channel OUT1 config
   */
-  sConfig.DAC_Trigger = DAC_TRIGGER_T6_TRGO;
+  sConfig.DAC_Trigger = DAC_TRIGGER_NONE;
   sConfig.DAC_OutputBuffer = DAC_OUTPUTBUFFER_ENABLE;
   if (HAL_DAC_ConfigChannel(&hdac, &sConfig, DAC_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** DAC channel OUT2 config
+  */
+  if (HAL_DAC_ConfigChannel(&hdac, &sConfig, DAC_CHANNEL_2) != HAL_OK)
   {
     Error_Handler();
   }
@@ -428,9 +500,9 @@ static void MX_I2C1_Init(void)
 
   /* USER CODE END I2C1_Init 1 */
   hi2c1.Instance = I2C1;
-  hi2c1.Init.ClockSpeed = 400000;
+  hi2c1.Init.ClockSpeed = 100000;
   hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
-  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.OwnAddress1 = 64;
   hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
   hi2c1.Init.OwnAddress2 = 0;
@@ -443,44 +515,6 @@ static void MX_I2C1_Init(void)
   /* USER CODE BEGIN I2C1_Init 2 */
 
   /* USER CODE END I2C1_Init 2 */
-
-}
-
-/**
-  * @brief SPI1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_SPI1_Init(void)
-{
-
-  /* USER CODE BEGIN SPI1_Init 0 */
-
-  /* USER CODE END SPI1_Init 0 */
-
-  /* USER CODE BEGIN SPI1_Init 1 */
-
-  /* USER CODE END SPI1_Init 1 */
-  /* SPI1 parameter configuration*/
-  hspi1.Instance = SPI1;
-  hspi1.Init.Mode = SPI_MODE_MASTER;
-  hspi1.Init.Direction = SPI_DIRECTION_2LINES;
-  hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
-  hspi1.Init.CLKPolarity = SPI_POLARITY_HIGH;
-  hspi1.Init.CLKPhase = SPI_PHASE_2EDGE;
-  hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_256;
-  hspi1.Init.FirstBit = SPI_FIRSTBIT_LSB;
-  hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
-  hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
-  hspi1.Init.CRCPolynomial = 10;
-  if (HAL_SPI_Init(&hspi1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN SPI1_Init 2 */
-
-  /* USER CODE END SPI1_Init 2 */
 
 }
 
@@ -502,13 +536,13 @@ static void MX_SPI2_Init(void)
   /* SPI2 parameter configuration*/
   hspi2.Instance = SPI2;
   hspi2.Init.Mode = SPI_MODE_MASTER;
-  hspi2.Init.Direction = SPI_DIRECTION_1LINE;
+  hspi2.Init.Direction = SPI_DIRECTION_2LINES;
   hspi2.Init.DataSize = SPI_DATASIZE_8BIT;
-  hspi2.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi2.Init.CLKPolarity = SPI_POLARITY_HIGH;
   hspi2.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi2.Init.NSS = SPI_NSS_SOFT;
-  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
-  hspi2.Init.FirstBit = SPI_FIRSTBIT_MSB;
+  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_256;
+  hspi2.Init.FirstBit = SPI_FIRSTBIT_LSB;
   hspi2.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi2.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
   hspi2.Init.CRCPolynomial = 10;
@@ -636,6 +670,44 @@ static void MX_TIM6_Init(void)
 }
 
 /**
+  * @brief TIM7 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM7_Init(void)
+{
+
+  /* USER CODE BEGIN TIM7_Init 0 */
+
+  /* USER CODE END TIM7_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM7_Init 1 */
+
+  /* USER CODE END TIM7_Init 1 */
+  htim7.Instance = TIM7;
+  htim7.Init.Prescaler = 0;
+  htim7.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim7.Init.Period = 65535;
+  htim7.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim7) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim7, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM7_Init 2 */
+
+  /* USER CODE END TIM7_Init 2 */
+
+}
+
+/**
   * @brief USART2 Initialization Function
   * @param None
   * @retval None
@@ -706,7 +778,7 @@ static void MX_USART3_UART_Init(void)
   * @param None
   * @retval None
   */
-static void MX_USB_OTG_FS_HCD_Init(void)
+static void MX_USB_OTG_FS_PCD_Init(void)
 {
 
   /* USER CODE BEGIN USB_OTG_FS_Init 0 */
@@ -716,13 +788,17 @@ static void MX_USB_OTG_FS_HCD_Init(void)
   /* USER CODE BEGIN USB_OTG_FS_Init 1 */
 
   /* USER CODE END USB_OTG_FS_Init 1 */
-  hhcd_USB_OTG_FS.Instance = USB_OTG_FS;
-  hhcd_USB_OTG_FS.Init.Host_channels = 8;
-  hhcd_USB_OTG_FS.Init.speed = HCD_SPEED_FULL;
-  hhcd_USB_OTG_FS.Init.dma_enable = DISABLE;
-  hhcd_USB_OTG_FS.Init.phy_itface = HCD_PHY_EMBEDDED;
-  hhcd_USB_OTG_FS.Init.Sof_enable = DISABLE;
-  if (HAL_HCD_Init(&hhcd_USB_OTG_FS) != HAL_OK)
+  hpcd_USB_OTG_FS.Instance = USB_OTG_FS;
+  hpcd_USB_OTG_FS.Init.dev_endpoints = 4;
+  hpcd_USB_OTG_FS.Init.speed = PCD_SPEED_FULL;
+  hpcd_USB_OTG_FS.Init.dma_enable = DISABLE;
+  hpcd_USB_OTG_FS.Init.phy_itface = PCD_PHY_EMBEDDED;
+  hpcd_USB_OTG_FS.Init.Sof_enable = DISABLE;
+  hpcd_USB_OTG_FS.Init.low_power_enable = DISABLE;
+  hpcd_USB_OTG_FS.Init.lpm_enable = DISABLE;
+  hpcd_USB_OTG_FS.Init.vbus_sensing_enable = DISABLE;
+  hpcd_USB_OTG_FS.Init.use_dedicated_ep1 = DISABLE;
+  if (HAL_PCD_Init(&hpcd_USB_OTG_FS) != HAL_OK)
   {
     Error_Handler();
   }
@@ -775,31 +851,37 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3|GPIO_PIN_10|GPIO_PIN_11|GPIO_PIN_13, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(OTG_FS_PowerSwitchOn_GPIO_Port, OTG_FS_PowerSwitchOn_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3|GPIO_PIN_8, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(SPI2_CS_GPIO_Port, SPI2_CS_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOD, LD4_Pin|LD3_Pin|LD5_Pin|LD6_Pin
-                          |Audio_RST_Pin, GPIO_PIN_RESET);
+                          |GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|Audio_RST_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : PE3 PE10 PE11 PE13 */
-  GPIO_InitStruct.Pin = GPIO_PIN_3|GPIO_PIN_10|GPIO_PIN_11|GPIO_PIN_13;
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_9, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : PE3 */
+  GPIO_InitStruct.Pin = GPIO_PIN_3;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : OTG_FS_PowerSwitchOn_Pin */
-  GPIO_InitStruct.Pin = OTG_FS_PowerSwitchOn_Pin;
+  /*Configure GPIO pins : OTG_FS_PowerSwitchOn_Pin PC9 */
+  GPIO_InitStruct.Pin = OTG_FS_PowerSwitchOn_Pin|GPIO_PIN_9;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(OTG_FS_PowerSwitchOn_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /*Configure GPIO pin : PDM_OUT_Pin */
   GPIO_InitStruct.Pin = PDM_OUT_Pin;
@@ -815,24 +897,26 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : PA3 */
-  GPIO_InitStruct.Pin = GPIO_PIN_3;
+  /*Configure GPIO pins : PA3 PA8 */
+  GPIO_InitStruct.Pin = GPIO_PIN_3|GPIO_PIN_8;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PB2 PB8 */
-  GPIO_InitStruct.Pin = GPIO_PIN_2|GPIO_PIN_8;
+  /*Configure GPIO pins : SPI1_MISO_Pin SPI1_MOSI_Pin */
+  GPIO_InitStruct.Pin = SPI1_MISO_Pin|SPI1_MOSI_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Alternate = GPIO_AF5_SPI1;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PB2 */
+  GPIO_InitStruct.Pin = GPIO_PIN_2;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : PE12 */
-  GPIO_InitStruct.Pin = GPIO_PIN_12;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
   /*Configure GPIO pin : CLK_IN_Pin */
   GPIO_InitStruct.Pin = CLK_IN_Pin;
@@ -842,14 +926,33 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Alternate = GPIO_AF5_SPI2;
   HAL_GPIO_Init(CLK_IN_GPIO_Port, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : SPI2_CS_Pin */
+  GPIO_InitStruct.Pin = SPI2_CS_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(SPI2_CS_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PD9 */
+  GPIO_InitStruct.Pin = GPIO_PIN_9;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+
   /*Configure GPIO pins : LD4_Pin LD3_Pin LD5_Pin LD6_Pin
-                           Audio_RST_Pin */
+                           PD0 PD1 PD2 Audio_RST_Pin */
   GPIO_InitStruct.Pin = LD4_Pin|LD3_Pin|LD5_Pin|LD6_Pin
-                          |Audio_RST_Pin;
+                          |GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|Audio_RST_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PC6 */
+  GPIO_InitStruct.Pin = GPIO_PIN_6;
+  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /*Configure GPIO pins : I2S3_MCK_Pin I2S3_SCK_Pin I2S3_SD_Pin */
   GPIO_InitStruct.Pin = I2S3_MCK_Pin|I2S3_SCK_Pin|I2S3_SD_Pin;
@@ -857,6 +960,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   GPIO_InitStruct.Alternate = GPIO_AF6_SPI3;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PC8 */
+  GPIO_InitStruct.Pin = GPIO_PIN_8;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /*Configure GPIO pin : OTG_FS_OverCurrent_Pin */
@@ -882,92 +991,52 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
- void StartPS2CommandTask(void *argument)
- {
-	 uint16_t dac_value = 0;
-	 while(1) {
-		 PS2_Init(PS2);
-		 PS2_ReadData(PS2, &huart3, s_buffer);
 
-		 volatile uint8_t word_count = 0;
-		 volatile uint8_t L_ud_analog = 0;
-		 volatile uint8_t L_lr_analog = 0;
-		 volatile uint8_t R_ud_analog = 0;
-		 volatile uint8_t R_lr_analog = 0;
-         for (uint8_t *lptr = s_buffer, *rptr = s_buffer; *rptr != *(s_buffer + 14); rptr++) {
-        	 if (checkAsciiHex(*lptr) && *rptr == ',') {
-        		 switch(word_count) {
-					 case 0:
-						 L_ud_analog = mapAsciiuint8(*lptr) * 16 + mapAsciiuint8(*(lptr+1));
-						 break;
-					 case 1:
-						 L_lr_analog = mapAsciiuint8(*lptr) * 16 + mapAsciiuint8(*(lptr+1));
-						 break;
-					 case 2:
-						 R_ud_analog = mapAsciiuint8(*lptr) * 16 + mapAsciiuint8(*(lptr+1));
-						 break;
-					 case 3:
-						 R_lr_analog = mapAsciiuint8(*lptr) * 16 + mapAsciiuint8(*(lptr+1));
-						 break;
-        	     }
-        	     lptr = rptr + 1;
-        	     word_count++;
-             }
-        	 else if (!checkAsciiHex(*lptr))
-        		 lptr++;
-	     }
-         uint16_t vptr = 4096 - L_ud_analog*4096/256;
-         //printf("%d %d %d %d\n", L_ud_analog, L_lr_analog, R_ud_analog, R_lr_analog);
-
-         //HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 0);
-         if (dac_value < 4095) {
-         	dac_value++;
-         } else {
-         	dac_value=0;
-         }
-	 }
- }
 /* USER CODE END 4 */
 
-/* USER CODE BEGIN Header_StartDefaultTask */
+/* USER CODE BEGIN Header_StartBalanceTask */
 /**
-  * @brief  Function implementing the defaultTask thread.
+  * @brief  Function implementing the BalanceTask thread.
   * @param  argument: Not used
   * @retval None
   */
-/* USER CODE END Header_StartDefaultTask */
-void StartDefaultTask(void *argument)
+/* USER CODE END Header_StartBalanceTask */
+void StartBalanceTask(void *argument)
 {
   /* USER CODE BEGIN 5 */
   /* Infinite loop */
-  while (1) {
-
-    //HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 4095);
-	bool status = 0;
-	status = HAL_GPIO_ReadPin(GPIOB, 7);
-    osDelay(1);
+  while(1)
+  {
+	  CommPacket_Read(&huart3, uartRX_buffer, UART_RXSIZE, &IMUData);
+	  IS_UART_BuildComm(&IMUData);
+	  IS_UART_DatamapScooter(&IMUData, &E_scooter_state);
+	  PS2_ReadData(&hi2c1, i2cRxBuffer);
+	  if (i2cRxBuffer[1] > 128)
+		  DAC_value = DAC_value == 0 ? 0 : DAC_value - 10;
+	  else if (i2cRxBuffer[1] < 128)
+		  DAC_value = (4095 - 4095*(255 - i2cRxBuffer[1])/128) | 0xfff;
+	  HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, DAC_value);
+      osDelay(1);
   }
   /* USER CODE END 5 */
 }
 
-/* USER CODE BEGIN Header_StartTask02 */
+/* USER CODE BEGIN Header_StartSpeedRotation */
 /**
-* @brief Function implementing the myTask02 thread.
+* @brief Function implementing the SpeedRotation thread.
 * @param argument: Not used
 * @retval None
 */
-/* USER CODE END Header_StartTask02 */
-void StartTask02(void *argument)
+/* USER CODE END Header_StartSpeedRotation */
+void StartSpeedRotation(void *argument)
 {
-  /* USER CODE BEGIN StartTask02 */
-  //HAL_UART_Receive_IT(&huart2, receive_buffer, 200);
+  /* USER CODE BEGIN StartSpeedRotation */
   /* Infinite loop */
-  while (1) {
-	  HAL_UART_Receive_IT(&huart2, receive_buffer, 200);
-	  //HAL_UART_Receive(&huart2, receive_buffer, 200, 50);
-      osDelay(1);
+  for(;;)
+  {
+    osDelay(1);
   }
-  /* USER CODE END StartTask02 */
+  /* USER CODE END StartSpeedRotation */
 }
 
 /**
