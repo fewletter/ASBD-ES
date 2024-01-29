@@ -19,6 +19,8 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "cmsis_os.h"
+#include "fatfs.h"
+#include "usb_host.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -31,6 +33,7 @@
 #include "PS2.h"
 #include <string.h>
 #include "RWheel.h"
+#include <time.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -40,6 +43,12 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define UNUSED(X) (void)X
+
+#define RESTRICT(x, bigvalue, smallvalue)     \
+    if (x >= bigvalue) x = bigvalue;          \
+    else if (x <= smallvalue) x = smallvalue;
+
 #define UART_RXSIZE 145
 /* USER CODE END PD */
 
@@ -67,13 +76,11 @@ UART_HandleTypeDef huart3;
 DMA_HandleTypeDef hdma_usart3_rx;
 DMA_HandleTypeDef hdma_usart3_tx;
 
-PCD_HandleTypeDef hpcd_USB_OTG_FS;
-
 /* Definitions for BalanceTask */
 osThreadId_t BalanceTaskHandle;
 const osThreadAttr_t BalanceTask_attributes = {
   .name = "BalanceTask",
-  .stack_size = 2048 * 4,
+  .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityHigh,
 };
 /* Definitions for SpeedRotation */
@@ -100,7 +107,6 @@ static void MX_ADC1_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_TIM6_Init(void);
 static void MX_TIM7_Init(void);
-static void MX_USB_OTG_FS_PCD_Init(void);
 void StartBalanceTask(void *argument);
 void StartSpeedRotation(void *argument);
 
@@ -110,12 +116,26 @@ void StartSpeedRotation(void *argument);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+/*
+ * Define UART RX buffer
+ */
 uint8_t uartRX_buffer[UART_RXSIZE] = {0};
 
+/*
+ * Define I2C RX/TX buffer
+ */
 uint8_t i2cRxBuffer[10] = {0};
 uint8_t i2cTxBuffer[2] = {1, 6};
+
+/*
+ * Define DAC value
+ */
 uint16_t DAC_value = 1;
 
+
+/*
+ * Define IMU state & E-scooter state
+ */
 CommPacket IMUData = {
 	.buffer = {0},
 	.head = NULL,
@@ -132,10 +152,10 @@ E_Scooter E_scooter_state = {
 
 PS2_State PS2 = {0, {0, 0}, {0, 0}};
 
-bool checkAsciidigit(uint8_t digit)
-{
-	return ((digit - '0') >= 0 && (digit - '9') <= 0) ? true : false;
-}
+/*
+ * Define usb transfer state
+ */
+
 
 /*
  * Interrupt callback function
@@ -151,79 +171,7 @@ void HAL_I2C_MasterRxCpltCallback (I2C_HandleTypeDef * hi2c)
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-	int comma_count = 0;
-	uint8_t modify_buffer[80] = {0};
-	/*
-	for (int i = 0; i < 80; i++) {
-		if (uartRX_buffer[i] == '$' && uartRX_buffer[i+1] == 'P' && uartRX_buffer[i+2] == 'P' && uartRX_buffer[i+3] == 'I' && uartRX_buffer[i+4] == 'M' && uartRX_buffer[i+5] == 'U') {
-			strncpy( modify_buffer, &uartRX_buffer[i], 80-i);
-			strncpy( &modify_buffer[80-i], uartRX_buffer, i);
-			break;
-		}
-	}
-
-    bool sign = 0;
-    int start = 0;
-	for (int i = 0; i < 80; i++) {
-		if (modify_buffer[i] == ',') {
-			comma_count += 1;
-			sign = modify_buffer[i+1] == '-' ? 1 : 0;
-		    start = i+1+sign;
-
-		    switch (comma_count) {
-			case 2:
-				E_scooter.theta[0] = (checkAsciidigit(modify_buffer[start]) ?  modify_buffer[start] - '0': 0)
-						+ (checkAsciidigit(modify_buffer[start+2]) ?  (modify_buffer[start+2] - '0') * 0.1: 0)
-						+ (checkAsciidigit(modify_buffer[start+3]) ?  (modify_buffer[start+3] - '0') * 0.01: 0)
-						+ (checkAsciidigit(modify_buffer[start+4]) ?  (modify_buffer[start+4] - '0') * 0.001: 0)
-						+ (checkAsciidigit(modify_buffer[start+5]) ?  (modify_buffer[start+5] - '0') * 0.0001: 0);
-				E_scooter.theta[0] = sign ? E_scooter.theta[0]*(-1) : E_scooter.theta[0];
-				break;
-			case 3:
-				E_scooter.theta[1] = (checkAsciidigit(modify_buffer[start]) ?  modify_buffer[start] - '0': 0)
-						+ (checkAsciidigit(modify_buffer[start+2]) ?  (modify_buffer[start+2] - '0') * 0.1: 0)
-						+ (checkAsciidigit(modify_buffer[start+3]) ?  (modify_buffer[start+3] - '0') * 0.01: 0)
-						+ (checkAsciidigit(modify_buffer[start+4]) ?  (modify_buffer[start+4] - '0') * 0.001: 0)
-						+ (checkAsciidigit(modify_buffer[start+5]) ?  (modify_buffer[start+5] - '0') * 0.0001: 0);
-				E_scooter.theta[1] = sign ? E_scooter.theta[1]*(-1) : E_scooter.theta[1];
-				break;
-			case 4:
-				E_scooter.theta[2] = (checkAsciidigit(modify_buffer[start]) ?  modify_buffer[start] - '0': 0)
-						+ (checkAsciidigit(modify_buffer[start+2]) ?  (modify_buffer[start+2] - '0') * 0.1: 0)
-						+ (checkAsciidigit(modify_buffer[start+3]) ?  (modify_buffer[start+3] - '0') * 0.01: 0)
-						+ (checkAsciidigit(modify_buffer[start+4]) ?  (modify_buffer[start+4] - '0') * 0.001: 0)
-						+ (checkAsciidigit(modify_buffer[start+5]) ?  (modify_buffer[start+5] - '0') * 0.0001: 0);
-				E_scooter.theta[2] = sign ? E_scooter.theta[2]*(-1) : E_scooter.theta[2];
-				break;
-			case 5:
-				E_scooter.vel[0] = (checkAsciidigit(modify_buffer[start]) ?  modify_buffer[start] - '0': 0)
-						+ (checkAsciidigit(modify_buffer[start+2]) ?  (modify_buffer[start+2] - '0') * 0.1: 0)
-						+ (checkAsciidigit(modify_buffer[start+3]) ?  (modify_buffer[start+3] - '0') * 0.01: 0)
-						+ (checkAsciidigit(modify_buffer[start+4]) ?  (modify_buffer[start+4] - '0') * 0.001: 0)
-						+ (checkAsciidigit(modify_buffer[start+5]) ?  (modify_buffer[start+5] - '0') * 0.0001: 0);
-				E_scooter.vel[0] = sign ? E_scooter.vel[0]*(-1) : E_scooter.vel[0];
-				break;
-			case 6:
-				E_scooter.vel[1] = (checkAsciidigit(modify_buffer[start]) ?  modify_buffer[start] - '0': 0)
-						+ (checkAsciidigit(modify_buffer[start+2]) ?  (modify_buffer[start+2] - '0') * 0.1: 0)
-						+ (checkAsciidigit(modify_buffer[start+3]) ?  (modify_buffer[start+3] - '0') * 0.01: 0)
-						+ (checkAsciidigit(modify_buffer[start+4]) ?  (modify_buffer[start+4] - '0') * 0.001: 0)
-						+ (checkAsciidigit(modify_buffer[start+5]) ?  (modify_buffer[start+5] - '0') * 0.0001: 0);
-				E_scooter.vel[1] = sign ? E_scooter.vel[1]*(-1) : E_scooter.vel[1];
-				break;
-			case 7:
-				E_scooter.vel[2] = (checkAsciidigit(modify_buffer[start]) ?  modify_buffer[start] - '0': 0)
-						+ (checkAsciidigit(modify_buffer[start+2]) ?  (modify_buffer[start+2] - '0') * 0.1: 0)
-						+ (checkAsciidigit(modify_buffer[start+3]) ?  (modify_buffer[start+3] - '0') * 0.01: 0)
-						+ (checkAsciidigit(modify_buffer[start+4]) ?  (modify_buffer[start+4] - '0') * 0.001: 0)
-						+ (checkAsciidigit(modify_buffer[start+5]) ?  (modify_buffer[start+5] - '0') * 0.0001: 0);
-				E_scooter.vel[2] = sign ? E_scooter.vel[2]*(-1) : E_scooter.vel[2];
-				break;
-			}
-		}
-	}
-	*/
-	//HAL_UART_Receive_IT(&huart2, uartRX_buffer, 150);
+	UNUSED(huart);
 }
 
 uint8_t mapAsciiuint8(uint8_t digit)
@@ -270,7 +218,7 @@ int main(void)
   MX_USART3_UART_Init();
   MX_TIM6_Init();
   MX_TIM7_Init();
-  MX_USB_OTG_FS_PCD_Init();
+  MX_FATFS_Init();
   /* USER CODE BEGIN 2 */
   HAL_TIM_Base_Start(&htim6);
   HAL_DAC_Start(&hdac, DAC_CHANNEL_1);
@@ -774,41 +722,6 @@ static void MX_USART3_UART_Init(void)
 }
 
 /**
-  * @brief USB_OTG_FS Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USB_OTG_FS_PCD_Init(void)
-{
-
-  /* USER CODE BEGIN USB_OTG_FS_Init 0 */
-
-  /* USER CODE END USB_OTG_FS_Init 0 */
-
-  /* USER CODE BEGIN USB_OTG_FS_Init 1 */
-
-  /* USER CODE END USB_OTG_FS_Init 1 */
-  hpcd_USB_OTG_FS.Instance = USB_OTG_FS;
-  hpcd_USB_OTG_FS.Init.dev_endpoints = 4;
-  hpcd_USB_OTG_FS.Init.speed = PCD_SPEED_FULL;
-  hpcd_USB_OTG_FS.Init.dma_enable = DISABLE;
-  hpcd_USB_OTG_FS.Init.phy_itface = PCD_PHY_EMBEDDED;
-  hpcd_USB_OTG_FS.Init.Sof_enable = DISABLE;
-  hpcd_USB_OTG_FS.Init.low_power_enable = DISABLE;
-  hpcd_USB_OTG_FS.Init.lpm_enable = DISABLE;
-  hpcd_USB_OTG_FS.Init.vbus_sensing_enable = DISABLE;
-  hpcd_USB_OTG_FS.Init.use_dedicated_ep1 = DISABLE;
-  if (HAL_PCD_Init(&hpcd_USB_OTG_FS) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USB_OTG_FS_Init 2 */
-
-  /* USER CODE END USB_OTG_FS_Init 2 */
-
-}
-
-/**
   * Enable DMA controller clock
   */
 static void MX_DMA_Init(void)
@@ -1003,19 +916,39 @@ static void MX_GPIO_Init(void)
 /* USER CODE END Header_StartBalanceTask */
 void StartBalanceTask(void *argument)
 {
+  /* init code for USB_HOST */
+  MX_USB_HOST_Init();
   /* USER CODE BEGIN 5 */
   /* Infinite loop */
   while(1)
   {
+	  /*
+	   * Read Imu data and E-scooter state
+	   */
 	  CommPacket_Read(&huart3, uartRX_buffer, UART_RXSIZE, &IMUData);
 	  IS_UART_BuildComm(&IMUData);
 	  IS_UART_DatamapScooter(&IMUData, &E_scooter_state);
+
+	  /*
+	   * Read PS2 data
+	   */
 	  PS2_ReadData(&hi2c1, i2cRxBuffer);
-	  if (i2cRxBuffer[1] > 128)
-		  DAC_value = DAC_value == 0 ? 0 : DAC_value - 10;
+
+	  if (i2cRxBuffer[1] == 128)
+		  DAC_value = DAC_value;
 	  else if (i2cRxBuffer[1] < 128)
-		  DAC_value = (4095 - 4095*(255 - i2cRxBuffer[1])/128) | 0xfff;
+		  DAC_value = DAC_value >= 4095 ? 4095 : DAC_value + 10;
+	  else if (i2cRxBuffer[1] > 128)
+		  DAC_value = DAC_value == 1600 ? 1600 : DAC_value - 10;
+
+	  RESTRICT(DAC_value, 4095, 1600);
+	  PS2_DatamapScooter(DAC_value, &E_scooter_state);
+
+	  /*
+	   * Activate E-scooter linear velocity
+	   */
 	  HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, DAC_value);
+
       osDelay(1);
   }
   /* USER CODE END 5 */

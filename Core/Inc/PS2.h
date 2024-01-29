@@ -12,6 +12,7 @@
 #include <stdbool.h>
 #include "main.h"
 #include "core_cm4.h"
+#include "IS_UART_Comm.h"
 
 #define START     0x01
 #define READDATA  0x42
@@ -46,9 +47,10 @@ typedef struct {
 	uint8_t Rstick[2];
 }PS2_State;
 
-extern void PS2_Init(PS2_State*);
-extern void PS2_ReadData(PS2_State*, UART_HandleTypeDef*, uint8_t*);
+void PS2_Init(PS2_State*);
+void PS2_ReadData(I2C_HandleTypeDef*, uint8_t*);
 bool PS2_checkAsciiHex(uint8_t);
 uint8_t PS2_mapAsciiuint8(uint8_t digit);
+void PS2_DatamapScooter(uint16_t, E_Scooter*);
 
 #endif /* INC_PS2_H_ */
