@@ -111,6 +111,11 @@ void StartBalanceTask(void *argument);
 void StartSpeedRotation(void *argument);
 
 /* USER CODE BEGIN PFP */
+typedef struct {
+	TickType_t xStart;
+	TickType_t xEnd;
+	TickType_t xExetime;
+} Exe_timer;
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -153,9 +158,13 @@ E_Scooter E_scooter_state = {
 PS2_State PS2 = {0, {0, 0}, {0, 0}};
 
 /*
- * Define usb transfer state
+ * Define timer
  */
-
+Exe_timer Receivedata_timer = {
+    .xStart = 0,
+    .xEnd = 0,
+    .xExetime = 0,
+  };
 
 /*
  * Interrupt callback function
@@ -919,9 +928,11 @@ void StartBalanceTask(void *argument)
   /* init code for USB_HOST */
   MX_USB_HOST_Init();
   /* USER CODE BEGIN 5 */
+
   /* Infinite loop */
   while(1)
   {
+	  Receivedata_timer.xStart = xTaskGetTickCount();
 	  /*
 	   * Read Imu data and E-scooter state
 	   */
@@ -943,6 +954,8 @@ void StartBalanceTask(void *argument)
 
 	  RESTRICT(DAC_value, 4095, 1600);
 	  PS2_DatamapScooter(DAC_value, &E_scooter_state);
+	  Receivedata_timer.xEnd = xTaskGetTickCount();
+	  Receivedata_timer.xExetime = Receivedata_timer.xEnd - Receivedata_timer.xStart;
 
 	  /*
 	   * Activate E-scooter linear velocity
