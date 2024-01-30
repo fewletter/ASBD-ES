@@ -76,12 +76,12 @@ UART_HandleTypeDef huart3;
 DMA_HandleTypeDef hdma_usart3_rx;
 DMA_HandleTypeDef hdma_usart3_tx;
 
-/* Definitions for BalanceTask */
-osThreadId_t BalanceTaskHandle;
-const osThreadAttr_t BalanceTask_attributes = {
-  .name = "BalanceTask",
+/* Definitions for GetdataTask */
+osThreadId_t GetdataTaskHandle;
+const osThreadAttr_t GetdataTask_attributes = {
+  .name = "GetdataTask",
   .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityHigh,
+  .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for SpeedRotation */
 osThreadId_t SpeedRotationHandle;
@@ -89,6 +89,18 @@ const osThreadAttr_t SpeedRotation_attributes = {
   .name = "SpeedRotation",
   .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityAboveNormal,
+};
+/* Definitions for Startbalance */
+osThreadId_t StartbalanceHandle;
+const osThreadAttr_t Startbalance_attributes = {
+  .name = "Startbalance",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityRealtime,
+};
+/* Definitions for Escooter_state_queue */
+osMessageQueueId_t Escooter_state_queueHandle;
+const osMessageQueueAttr_t Escooter_state_queue_attributes = {
+  .name = "Escooter_state_queue"
 };
 /* USER CODE BEGIN PV */
 
@@ -107,8 +119,9 @@ static void MX_ADC1_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_TIM6_Init(void);
 static void MX_TIM7_Init(void);
-void StartBalanceTask(void *argument);
+void StartGetdataTask(void *argument);
 void StartSpeedRotation(void *argument);
+void StartbalanceTask(void *argument);
 
 /* USER CODE BEGIN PFP */
 typedef struct {
@@ -254,16 +267,23 @@ int main(void)
   /* start timers, add new ones, ... */
   /* USER CODE END RTOS_TIMERS */
 
+  /* Create the queue(s) */
+  /* creation of Escooter_state_queue */
+  Escooter_state_queueHandle = osMessageQueueNew (6, sizeof(float), &Escooter_state_queue_attributes);
+
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
-  /* creation of BalanceTask */
-  BalanceTaskHandle = osThreadNew(StartBalanceTask, NULL, &BalanceTask_attributes);
+  /* creation of GetdataTask */
+  GetdataTaskHandle = osThreadNew(StartGetdataTask, NULL, &GetdataTask_attributes);
 
   /* creation of SpeedRotation */
   SpeedRotationHandle = osThreadNew(StartSpeedRotation, NULL, &SpeedRotation_attributes);
+
+  /* creation of Startbalance */
+  StartbalanceHandle = osThreadNew(StartbalanceTask, NULL, &Startbalance_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -286,13 +306,37 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 	  //HAL_UART_Receive_IT(&huart2, (uint8_t *) uartRX_buffer, 80);
+	  Receivedata_timer.xStart = xTaskGetTickCount();
+	  /*
+	   * Read Imu data and E-scooter state
+	   */
+	  CommPacket_Read(&huart3, uartRX_buffer, UART_RXSIZE, &IMUData);
+	  IS_UART_BuildComm(&IMUData);
+	  IS_UART_DatamapScooter(&IMUData, &E_scooter_state);
+
+	  /*
+	   * Read PS2 data
+	   */
 	  PS2_ReadData(&hi2c1, i2cRxBuffer);
-	  if (i2cRxBuffer[1] > 128)
-		  DAC_value = DAC_value == 0 ? 0 : DAC_value - 10;
+
+	  if (i2cRxBuffer[1] == 128)
+		  DAC_value = DAC_value;
 	  else if (i2cRxBuffer[1] < 128)
-	  	  DAC_value = (4095 - 4095*(255 - i2cRxBuffer[1])/128) | 0xfff;
-	  HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, DAC_value);
-      HAL_Delay(100);
+		  DAC_value = DAC_value >= 4095 ? 4095 : DAC_value + 10;
+	  else if (i2cRxBuffer[1] > 128)
+		  DAC_value = DAC_value == 1600 ? 1600 : DAC_value - 10;
+
+	  RESTRICT(DAC_value, 4095, 1600);
+	  PS2_DatamapScooter(DAC_value, &E_scooter_state);
+	  Receivedata_timer.xEnd = xTaskGetTickCount();
+	  Receivedata_timer.xExetime = Receivedata_timer.xEnd - Receivedata_timer.xStart;
+
+	  /*
+	   * Activate E-scooter linear velocity
+	   */
+	  //HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, DAC_value);
+
+		osDelay(10);
   }
   /* USER CODE END 3 */
 }
@@ -916,14 +960,14 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE END 4 */
 
-/* USER CODE BEGIN Header_StartBalanceTask */
+/* USER CODE BEGIN Header_StartGetdataTask */
 /**
-  * @brief  Function implementing the BalanceTask thread.
+  * @brief  Function implementing the GetdataTask thread.
   * @param  argument: Not used
   * @retval None
   */
-/* USER CODE END Header_StartBalanceTask */
-void StartBalanceTask(void *argument)
+/* USER CODE END Header_StartGetdataTask */
+void StartGetdataTask(void *argument)
 {
   /* init code for USB_HOST */
   MX_USB_HOST_Init();
@@ -960,9 +1004,14 @@ void StartBalanceTask(void *argument)
 	  /*
 	   * Activate E-scooter linear velocity
 	   */
-	  HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, DAC_value);
+	  //HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, DAC_value);
+	  if (Receivedata_timer.xExetime == 12)
+		  vTaskSuspend(SpeedRotationHandle);
+	  else if (Receivedata_timer.xExetime == 22)
+		  vTaskResume(SpeedRotationHandle);
 
-      osDelay(1);
+      printf("get data\n");
+	  osDelay(1);
   }
   /* USER CODE END 5 */
 }
@@ -978,11 +1027,33 @@ void StartSpeedRotation(void *argument)
 {
   /* USER CODE BEGIN StartSpeedRotation */
   /* Infinite loop */
-  for(;;)
+  while(1)
   {
-    osDelay(1);
+	  HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, DAC_value);
+	  printf("speedrotation\n");
+      osDelay(25);
   }
   /* USER CODE END StartSpeedRotation */
+}
+
+/* USER CODE BEGIN Header_StartbalanceTask */
+/**
+* @brief Function implementing the Startbalance thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartbalanceTask */
+void StartbalanceTask(void *argument)
+{
+  /* USER CODE BEGIN StartbalanceTask */
+  /* Infinite loop */
+  while(1)
+  {
+	  RW_init();
+	  printf("balance\n");
+      osDelay(25);
+  }
+  /* USER CODE END StartbalanceTask */
 }
 
 /**
